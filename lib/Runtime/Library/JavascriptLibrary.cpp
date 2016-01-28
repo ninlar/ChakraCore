@@ -1254,6 +1254,8 @@ namespace Js
 
         booleanTrue = RecyclerNew(recycler, JavascriptBoolean, true, booleanTypeStatic);
         booleanFalse = RecyclerNew(recycler, JavascriptBoolean, false, booleanTypeStatic);
+
+        isPRNGSeeded = false;
         randSeed0 = 0;
         randSeed1 = 0;
 
@@ -1484,7 +1486,7 @@ namespace Js
         AddMember(globalObject, PropertyIds::JSON, JSONObject);
 
 #ifdef ENABLE_INTL_OBJECT
-        if (scriptContext->GetConfig()->IsIntlEnabled())
+        if (scriptContext->IsIntlEnabled())
         {
             IntlObject = DynamicObject::New(recycler,
                 DynamicType::New(scriptContext, TypeIds_Object, objectPrototype, nullptr,

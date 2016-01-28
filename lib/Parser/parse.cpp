@@ -2118,7 +2118,9 @@ ParseNodePtr Parser::ParseTerm(BOOL fAllowCall,
         m_pscan->Scan();
 
         // We search an Async expression (a function declaration or a async lambda expression)
-        if (pid == wellKnownPropertyPids.async && m_scriptContext->GetConfig()->IsES7AsyncAndAwaitEnabled())
+        if (pid == wellKnownPropertyPids.async &&
+            !m_pscan->FHadNewLine() &&
+            m_scriptContext->GetConfig()->IsES7AsyncAndAwaitEnabled())
         {
             if (m_token.tk == tkFUNCTION)
             {
@@ -3281,7 +3283,7 @@ ParseNodePtr Parser::ParseMemberList(LPCOLESTR pNameHint, ulong* pNameHintLength
             iecpMin = m_pscan->IecpMinTok();
 
             m_pscan->ScanForcingPid();
-            if (m_token.tk == tkLParen || m_token.tk == tkColon || m_token.tk == tkRCurly)
+            if (m_token.tk == tkLParen || m_token.tk == tkColon || m_token.tk == tkRCurly || m_pscan->FHadNewLine())
             {
                 m_pscan->SeekTo(parsedAsync);
             }
@@ -6218,7 +6220,7 @@ ParseNodePtr Parser::ParseClassDecl(BOOL isDeclaration, LPCOLESTR pNameHint, ulo
             iecpMin = m_pscan->IecpMinTok();
 
             m_pscan->Scan();
-            if (m_token.tk == tkLParen)
+            if (m_token.tk == tkLParen || m_pscan->FHadNewLine())
             {
                 m_pscan->SeekTo(parsedAsync);
             }
@@ -7207,7 +7209,7 @@ ParseNodePtr Parser::ParseExpr(int oplMin,
             if (!m_pscan->YieldIsKeyword() || oplMin > opl)
             {
                 // The case where 'yield' is scanned as a keyword (tkYIELD) but the scanner
-                // is not treating yield as a keyword (!m_pscan->YieldIsKeyword()) happens
+                // is not treating yield as a keyword (!m_pscan->YieldIsKeyword()) occurs
                 // in strict mode non-generator function contexts.
                 //
                 // That is, 'yield' is a keyword because of strict mode, but YieldExpression
@@ -7225,18 +7227,18 @@ ParseNodePtr Parser::ParseExpr(int oplMin,
         }
         else if (nop == knopAwait)
         {
-            if (!m_pscan->AwaitIsKeyword() || oplMin > opl)
+            if (!m_pscan->AwaitIsKeyword() ||
+                (GetCurrentFunctionNode()->sxFnc.IsAsync() && m_currentScope->GetScopeType() == ScopeType_Parameter))
             {
-                // As 'yield' keyword, the case where 'await' is scanned as a keyword (tkAWAIT) but the scanner
-                // is not treating await as a keyword (!m_pscan->AwaitIsKeyword()) happens
-                // in strict mode non-generator function contexts.
+                // As with the 'yield' keyword, the case where 'await' is scanned as a keyword (tkAWAIT)
+                // but the scanner is not treating await as a keyword (!m_pscan->AwaitIsKeyword())
+                // occurs in strict mode non-async function contexts.
                 //
                 // That is, 'await' is a keyword because of strict mode, but AwaitExpression
-                // is not a grammar production outside of generator functions.
+                // is not a grammar production outside of async functions.
                 //
-                // Otherwise it is an error for a yield to appear in the context of a higher level
-                // binding operator, be it unary or binary.
-                Error(ERRsyntax);
+                // Further, await expressions are disallowed within parameter scopes.
+                Error(ERRbadAwait);
             }
         }
 
@@ -7545,7 +7547,7 @@ ParseNodePtr Parser::ParseExpr(int oplMin,
                 iecpMin = m_pscan->IecpMinTok();
                 m_pscan->Scan();
 
-                if (m_token.tk == tkID || m_token.tk == tkLParen)
+                if ((m_token.tk == tkID || m_token.tk == tkLParen) && !m_pscan->FHadNewLine())
                 {
                     flags |= fFncAsync;
                     isAsyncMethod = true;
@@ -8458,7 +8460,7 @@ LFunctionStatement:
             iecpMin = m_pscan->IecpMinTok();
 
             m_pscan->Scan();
-            if (m_token.tk == tkFUNCTION)
+            if (m_token.tk == tkFUNCTION && !m_pscan->FHadNewLine())
             {
                 isAsyncMethod = true;
                 goto LFunctionStatement;
