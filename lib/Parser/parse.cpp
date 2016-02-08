@@ -1977,7 +1977,12 @@ void Parser::ReduceDeferredScriptLength(size_t chars)
 {
     // If we're in deferred mode, subtract the given char count from the total length,
     // and see if this puts us under the deferral threshold.
-    if (m_grfscr & fscrDeferFncParse)
+    if ((m_grfscr & fscrDeferFncParse) &&
+        (
+            PHASE_OFF1(Js::DeferEventHandlersPhase) || 
+            !(m_grfscr & (fscrImplicitThis|fscrImplicitParents))
+        )
+    )
     {
         if (m_length > chars)
         {
@@ -2117,7 +2122,7 @@ ParseNodePtr Parser::ParseTerm(BOOL fAllowCall,
 
         m_pscan->Scan();
 
-        // We search an Async expression (a function declaration or a async lambda expression)
+        // We search for an Async expression (a function declaration or an async lambda expression)
         if (pid == wellKnownPropertyPids.async &&
             !m_pscan->FHadNewLine() &&
             m_scriptContext->GetConfig()->IsES7AsyncAndAwaitEnabled())
@@ -2681,7 +2686,7 @@ ParseNodePtr Parser::ParsePostfixOperators(
                            str,
                            pnode->sxBin.pnode2->sxPid.pid->Cch(),
                            &uintValue) &&
-                       !Js::TaggedInt::IsOverflow(uintValue)) // the optimization is not very useful if the number can't be represented as an TaggedInt
+                       !Js::TaggedInt::IsOverflow(uintValue)) // the optimization is not very useful if the number can't be represented as a TaggedInt
                     {
                         // No need to verify that uintValue != JavascriptArray::InvalidIndex since all nonnegative TaggedInts are valid indexes
                         auto intNode = CreateIntNodeWithScanner(uintValue); // implicit conversion from uint32 to long
@@ -2963,7 +2968,7 @@ ParseNodePtr Parser::ParseArrayLiteral()
 }
 
 /***************************************************************************
-Create a ArrayLiteral node
+Create an ArrayLiteral node
 Parse a list of array elements. [ a, b, , c, ]
 ***************************************************************************/
 template<bool buildAST>
@@ -4191,8 +4196,6 @@ bool Parser::ParseFncDeclHelper(ParseNodePtr pnodeFnc, ParseNodePtr pnodeFncPare
 
     if (fLambda)
     {
-        // lambda formals are parsed in strict mode always
-        m_fUseStrictMode = TRUE;
         CHAKRATEL_LANGSTATS_INC_LANGFEATURECOUNT(LambdaCount, m_scriptContext);
     }
 
@@ -4318,7 +4321,6 @@ bool Parser::ParseFncDeclHelper(ParseNodePtr pnodeFnc, ParseNodePtr pnodeFncPare
         m_ppnodeExprScope = nullptr;
 
         this->ParseFncFormals<buildAST>(pnodeFnc, flags);
-        m_fUseStrictMode = oldStrictMode;
 
         // Create function body scope
         ParseNodePtr pnodeInnerBlock = nullptr;
@@ -4493,12 +4495,10 @@ bool Parser::ParseFncDeclHelper(ParseNodePtr pnodeFnc, ParseNodePtr pnodeFncPare
         {
             this->m_fUseStrictMode = TRUE; // Now we know this function is in strict mode
 
-            if (!fLambda && !fWasAlreadyStrictMode)
+            if (!fWasAlreadyStrictMode)
             {
                 // If this function turned on strict mode then we didn't check the formal
                 // parameters or function name hint for future reserved word usage. So do that now.
-                // Except for lambdas which always treat formal parameters as strict and do not have
-                // a name.
                 RestorePoint afterFnc;
                 m_pscan->Capture(&afterFnc);
 
@@ -4523,7 +4523,7 @@ bool Parser::ParseFncDeclHelper(ParseNodePtr pnodeFnc, ParseNodePtr pnodeFncPare
 
                 // Fast forward to formal parameter list, check for future reserved words,
                 // then restore scanner as it was.
-                m_pscan->SeekTo(beginFormals);
+                m_pscan->SeekToForcingPid(beginFormals);
                 CheckStrictFormalParameters();
                 m_pscan->SeekTo(afterFnc);
             }
@@ -4648,7 +4648,7 @@ void Parser::ParseTopLevelDeferredFunc(ParseNodePtr pnodeFnc, ParseNodePtr pnode
     }
     else
     {
-        ParseStmtList<false>(nullptr, nullptr, SM_DeferedParse, true /* isSourceElementList */);
+        ParseStmtList<false>(nullptr, nullptr, SM_DeferredParse, true /* isSourceElementList */);
     }
 
     pnodeFnc->ichLim = m_pscan->IchLimTok();
@@ -5031,7 +5031,7 @@ void Parser::ParseNestedDeferredFunc(ParseNodePtr pnodeFnc, bool fLambda, bool *
             m_ppnodeVar = &m_currentNodeDeferredFunc->sxFnc.pnodeVars;
         }
 
-        ParseStmtList<false>(nullptr, nullptr, SM_DeferedParse, true /* isSourceElementList */, detectStrictModeOn);
+        ParseStmtList<false>(nullptr, nullptr, SM_DeferredParse, true /* isSourceElementList */, detectStrictModeOn);
 
         ChkCurTokNoScan(tkRCurly, ERRnoRcurly);
     }
@@ -5255,8 +5255,10 @@ void Parser::ParseFncFormals(ParseNodePtr pnodeFnc, ushort flags)
     BOOL forcePid = IsStrictMode() && ((flags & (fFncNoArg | fFncOneArg)) == 0);
     AutoTempForcePid autoForcePid(m_pscan, forcePid);
 
+    bool fLambda = (flags & fFncLambda) != 0;
+
     // Lambda's allow single formal specified by a single binding identifier without parentheses, special case it.
-    if (m_token.tk == tkID && (flags & fFncLambda))
+    if (fLambda && m_token.tk == tkID)
     {
         if (buildAST || BindDeferredPidRefs())
         {
@@ -5393,7 +5395,7 @@ void Parser::ParseFncFormals(ParseNodePtr pnodeFnc, ushort flags)
                     m_currentNodeFunc->grfpn |= PNodeFlags::fpnArguments_overriddenByDecl;
                 }
 
-                if (IsStrictMode() || isNonSimpleParameterList)
+                if (IsStrictMode() || isNonSimpleParameterList || fLambda)
                 {
                     IdentPtr pid = m_token.GetIdentifier(m_phtbl);
                     UpdateOrCheckForDuplicateInFormals(pid, &formals);
@@ -5676,6 +5678,14 @@ void Parser::ParseExpressionLambdaBody(ParseNodePtr pnodeLambda)
 
 void Parser::CheckStrictFormalParameters()
 {
+    if (m_token.tk == tkID)
+    {
+        // single parameter arrow function case
+        IdentPtr pid = m_token.GetIdentifier(m_phtbl);
+        CheckStrictModeEvalArgumentsUsage(pid);
+        return;
+    }
+
     Assert(m_token.tk == tkLParen);
     m_pscan->ScanForcingPid();
 
@@ -6692,7 +6702,6 @@ void Parser::TransformAsyncFncDeclAST(ParseNodePtr *pnodeBody, bool fLambda)
     SetCurrentStatement(nullptr);
 
     bool fPreviousYieldIsKeyword = m_pscan->SetYieldIsKeyword(FALSE);
-    BOOL oldStrictMode = this->m_fUseStrictMode;
     uint uDeferSave = m_grfscr & fscrDeferFncParse;
 
     pnodeBlock = StartParseBlock<true>(PnodeBlockType::Parameter, ScopeType_Parameter);
@@ -6706,8 +6715,6 @@ void Parser::TransformAsyncFncDeclAST(ParseNodePtr *pnodeBody, bool fLambda)
 
     ppnodeExprScopeSave = m_ppnodeExprScope;
     m_ppnodeExprScope = nullptr;
-
-    m_fUseStrictMode = oldStrictMode;
 
     pnodeInnerBlock = StartParseBlock<true>(PnodeBlockType::Function, ScopeType_FunctionBody);
     *m_ppnodeScope = pnodeInnerBlock;
@@ -6801,6 +6808,10 @@ void Parser::TransformAsyncFncDeclAST(ParseNodePtr *pnodeBody, bool fLambda)
         *pnodeBody = nullptr;
         AddToNodeList(pnodeBody, &lastNodeRef, pnodeReturn);
         AddToNodeList(pnodeBody, &lastNodeRef, CreateNodeWithScanner<knopEndCode>());
+    }
+    if (pnodeFncGenerator->sxFnc.GetStrictMode())
+    {
+        GetCurrentFunctionNode()->sxFnc.SetStrictMode();
     }
     lastNodeRef = NULL;
 }
@@ -7266,7 +7277,7 @@ ParseNodePtr Parser::ParseExpr(int oplMin,
         }
         else
         {
-            // Disallow spread after a Ellipsis token. This prevents chaining, and ensures spread is the top level expression.
+            // Disallow spread after an Ellipsis token. This prevents chaining, and ensures spread is the top level expression.
             pnodeT = ParseExpr<buildAST>(opl, &fCanAssign, TRUE, nop != knopEllipsis && fAllowEllipsis, nullptr /*hint*/, nullptr /*hintLength*/, nullptr /*hintOffset*/, &operandToken, true);
         }
 
@@ -8921,13 +8932,13 @@ LEndSwitch:
         {
             if (pnode)
             {
-                pnode->grfpn |= PNodeFlags::fpnExplicitSimicolon;
+                pnode->grfpn |= PNodeFlags::fpnExplicitSemicolon;
             }
             m_pscan->Scan();
         }
         else if (pnode)
         {
-            pnode->grfpn |= PNodeFlags::fpnAutomaticSimicolon;
+            pnode->grfpn |= PNodeFlags::fpnAutomaticSemicolon;
         }
 
         break;
@@ -9357,11 +9368,11 @@ LNeedTerminator:
         {
         case tkSColon:
             m_pscan->Scan();
-            if (pnode!= nullptr) pnode->grfpn |= PNodeFlags::fpnExplicitSimicolon;
+            if (pnode!= nullptr) pnode->grfpn |= PNodeFlags::fpnExplicitSemicolon;
             break;
         case tkEOF:
         case tkRCurly:
-            if (pnode!= nullptr) pnode->grfpn |= PNodeFlags::fpnAutomaticSimicolon;
+            if (pnode!= nullptr) pnode->grfpn |= PNodeFlags::fpnAutomaticSemicolon;
             break;
         default:
             if (!m_pscan->FHadNewLine())
@@ -9370,7 +9381,7 @@ LNeedTerminator:
             }
             else
             {
-                if (pnode!= nullptr) pnode->grfpn |= PNodeFlags::fpnAutomaticSimicolon;
+                if (pnode!= nullptr) pnode->grfpn |= PNodeFlags::fpnAutomaticSemicolon;
             }
             break;
         }
@@ -10192,14 +10203,6 @@ bool Parser::CheckForDirective(bool* pIsUseStrict, bool *pIsUseAsm, bool* pIsOct
 
 bool Parser::CheckStrictModeStrPid(IdentPtr pid)
 {
-    // If we're already in strict mode, no need to check if the string would put us in strict mode. So, this function would only
-    // return true if it detects a transition from non-strict to strict, which is what matters for callers.
-    // This is a minor optimization to avoid redundant string comparisons of nested "use strict" directives.
-    if (IsStrictMode())
-    {
-        return false;
-    }
-
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
     if (Js::Configuration::Global.flags.NoStrictMode)
         return false;
@@ -10375,7 +10378,7 @@ HRESULT Parser::ParseFunctionInBackground(ParseNodePtr pnodeFnc, ParseContext *p
         // Process a sequence of statements/declarations
         if (topLevelDeferred)
         {
-            ParseStmtList<false>(nullptr, nullptr, SM_DeferedParse, true);
+            ParseStmtList<false>(nullptr, nullptr, SM_DeferredParse, true);
         }
         else
         {
